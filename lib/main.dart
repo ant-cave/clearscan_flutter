@@ -557,6 +557,9 @@ class _CropScreenState extends State<CropScreen> {
   late List<Point> _points; // normalized
   int _rotation = 0;
   bool _busy = false;
+  // 批处理进度：正在处理第几页/共几页（用于加载层显示）
+  int _progressPage = 0;
+  int _progressTotal = 0;
 
   // 放大镜状态：当前拖拽的角点索引（-1 = 未拖拽）
   int _draggingIndex = -1;
@@ -625,6 +628,10 @@ class _CropScreenState extends State<CropScreen> {
   Future<void> _finishAll() async {
     // batch: crop -> enhance -> selected filter for every draft
     // 契约：cropPoints 是未旋转原图坐标系的归一化角点，先裁剪再旋转
+    setState(() {
+      _progressPage = 0;
+      _progressTotal = widget.drafts.length;
+    });
     final docId = await DocumentStore.nextDocumentId();
     var pageId = widget.drafts.first.id;
     final pages = <StoredPage>[];
@@ -640,6 +647,7 @@ class _CropScreenState extends State<CropScreen> {
       ];
       // 先按角点在原图上裁剪，再应用旋转，保证坐标系一致。
       // 裁剪失败直接抛出，绝不静默降级为未裁剪的原图
+      setState(() => _progressPage = i + 1);
       RgbaImage processed;
       try {
         processed = DocumentPerspectiveCorrector.crop(draft.original, corners);
@@ -755,7 +763,27 @@ class _CropScreenState extends State<CropScreen> {
         ],
       ),
       body: _busy
-          ? const Center(child: Text('批量处理中…'))
+          ? Center(
+              // 批处理加载层：可见的进度反馈（滤镜应用发生在这一步）
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: 20),
+                  Text(
+                    '正在处理第 $_progressPage/$_progressTotal 页',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    widget.selectedFilter == 'None'
+                        ? '应用文档增强'
+                        : '应用滤镜: ${widget.selectedFilter}',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            )
           : LayoutBuilder(builder: (context, constraints) {
               // rotated display dimensions
               final ow = draft.original.width, oh = draft.original.height;
@@ -781,11 +809,13 @@ class _CropScreenState extends State<CropScreen> {
                 return Positioned(
                   left: 0, top: 0,
                   child: Transform.translate(
-                    // 视觉手柄居中于角点；GestureDetector 比视觉大一圈（透明填充），
-                    // 保证角落位置也有足够大的触控热区
+                    // 角点必须位于触控容器（64px）的正中心：
+                    // 容器左上角 = 角点 - 半个触控区，视觉圆在容器内居中，
+                    // 圆心即角点。之前偏移量误用了视觉尺寸的一半，
+                    // 导致圆心向右下偏移半个触控区（32px）
                     offset: Offset(
-                      cx - _handleVisualSize / 2,
-                      cy - _handleVisualSize / 2,
+                      cx - _handleTouchSize / 2,
+                      cy - _handleTouchSize / 2,
                     ),
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
@@ -1014,82 +1044,6 @@ class _EditorScreenState extends State<EditorScreen> {
     setState(() => _meta = meta);
   }
 
-  Future<void> _applyFilter(String filter) async {
-    final meta = _meta;
-    if (meta == null || _busy) return;
-    setState(() => _busy = true);
-    try {
-      final pages = [...meta.pages];
-      final page = pages[_index];
-      final original = decodeImageBytes(await File(page.originalPath).readAsBytes());
-      // 重推导管线与保存时一致：原图角点裁剪 -> 应用旋转 -> 滤镜
-      RgbaImage processed;
-      if (page.cropPoints.isNotEmpty) {
-        final corners = [
-          for (final pair in page.cropPoints.split(';'))
-            Point(double.parse(pair.split(',')[0]), double.parse(pair.split(',')[1])),
-        ];
-        // 裁剪失败直接抛出，由 catch 统一在 UI 报错，不静默降级
-        processed = DocumentPerspectiveCorrector.crop(original, corners);
-      } else {
-        processed = original;
-      }
-      if (page.rotation != 0) {
-        processed = rotateQuarters(processed, page.rotation);
-      }
-      final result = filter == 'Enhanced'
-          ? ImageProcessor.enhanceDocument(processed)
-          : ImageProcessor.filter(processed, filter);
-      await File(page.processedPath).writeAsBytes(encodeJpegBytes(result));
-      await File(page.thumbPath)
-          .writeAsBytes(encodeJpegBytes(_thumbnailOf(result, 320)));
-      pages[_index] = StoredPage(
-        id: page.id,
-        pageIndex: page.pageIndex,
-        originalPath: page.originalPath,
-        processedPath: page.processedPath,
-        thumbPath: page.thumbPath,
-        cropPoints: page.cropPoints,
-        filter: filter,
-        rotation: page.rotation,
-        confidence: page.confidence,
-        width: result.width,
-        height: result.height,
-      );
-      await DocumentStore.saveDocument(meta.copyWith(pages: pages));
-      await _load();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('已应用滤镜: ${filter == 'Enhanced' ? '增强' : filter}'),
-          duration: const Duration(seconds: 1),
-        ));
-      }
-    } catch (e, stack) {
-      if (mounted) {
-        showErrorDialog(context, '滤镜处理失败', e, stack);
-      }
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _deletePage() async {
-    final meta = _meta;
-    if (meta == null || meta.pages.length <= 1) return;
-    final pages = [...meta.pages]..removeAt(_index);
-    for (var i = 0; i < pages.length; i++) {
-      pages[i] = StoredPage(
-        id: pages[i].id, pageIndex: i, originalPath: pages[i].originalPath,
-        processedPath: pages[i].processedPath, thumbPath: pages[i].thumbPath,
-        cropPoints: pages[i].cropPoints, filter: pages[i].filter,
-        confidence: pages[i].confidence, width: pages[i].width, height: pages[i].height,
-      );
-    }
-    await DocumentStore.saveDocument(meta.copyWith(pages: pages));
-    if (mounted) setState(() { _index = _index.clamp(0, pages.length - 1); });
-    await _load();
-  }
-
   /// 保存当前页处理图为 JPEG 到导出目录。
   Future<void> _exportImage() async {
     final meta = _meta;
@@ -1145,22 +1099,23 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  static RgbaImage _thumbnailOf(RgbaImage src, int maxSide) {
-    final scale = maxSide / (src.width > src.height ? src.width : src.height);
-    if (scale >= 1) return src;
-    final w = (src.width * scale).round(), h = (src.height * scale).round();
-    final out = Uint8List(w * h * 4);
-    for (var y = 0; y < h; y++) {
-      final sy = (y / scale).round().clamp(0, src.height - 1);
-      for (var x = 0; x < w; x++) {
-        final sx = (x / scale).round().clamp(0, src.width - 1);
-        final so = (sy * src.width + sx) * 4;
-        final o = (y * w + x) * 4;
-        out[o] = src.bytes[so]; out[o + 1] = src.bytes[so + 1];
-        out[o + 2] = src.bytes[so + 2]; out[o + 3] = 255;
-      }
+
+  /// 删除当前页（仅多页文档可用），页序号重排。
+  Future<void> _deletePage() async {
+    final meta = _meta;
+    if (meta == null || meta.pages.length <= 1) return;
+    final pages = [...meta.pages]..removeAt(_index);
+    for (var i = 0; i < pages.length; i++) {
+      pages[i] = StoredPage(
+        id: pages[i].id, pageIndex: i, originalPath: pages[i].originalPath,
+        processedPath: pages[i].processedPath, thumbPath: pages[i].thumbPath,
+        cropPoints: pages[i].cropPoints, filter: pages[i].filter,
+        confidence: pages[i].confidence, width: pages[i].width, height: pages[i].height,
+      );
     }
-    return RgbaImage(out, w, h);
+    await DocumentStore.saveDocument(meta.copyWith(pages: pages));
+    if (mounted) setState(() { _index = _index.clamp(0, pages.length - 1); });
+    await _load();
   }
 
   @override
@@ -1221,19 +1176,18 @@ class _EditorScreenState extends State<EditorScreen> {
               ],
             ),
       bottomNavigationBar: SafeArea(
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        // 滤镜在裁剪阶段选定后即固定（业务规则），编辑器仅展示当前滤镜，
+        // 不提供更改入口
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           child: Row(
             children: [
-              for (final f in ['Enhanced', 'Smart Gray', 'Magic Color', 'B&W', 'Ink', 'White Paper'])
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: OutlinedButton(
-                    onPressed: _busy ? null : () => _applyFilter(f),
-                    child: Text(f == 'Enhanced' ? '增强' : f),
-                  ),
-                ),
+              Icon(Icons.filter_alt_outlined, size: 18, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 8),
+              Text(
+                '滤镜: ${page!.filter == 'None' ? '原图' : (page.filter == 'Enhanced' ? '增强' : page.filter)}（裁剪时选定）',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             ],
           ),
         ),
