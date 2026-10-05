@@ -557,6 +557,8 @@ class _CropScreenState extends State<CropScreen> {
   late List<Point> _points; // normalized
   int _rotation = 0;
   bool _busy = false;
+  // 文档级统一滤镜：在裁剪页选定后对所有页生效（局部状态，保证 chip 可点选）。
+  late String _selectedFilter;
   // 批处理进度：正在处理第几页/共几页（用于加载层显示）
   int _progressPage = 0;
   int _progressTotal = 0;
@@ -575,6 +577,7 @@ class _CropScreenState extends State<CropScreen> {
   void initState() {
     super.initState();
     _index = widget.initialIndex;
+    _selectedFilter = widget.selectedFilter;
     _loadPoints();
   }
 
@@ -656,8 +659,8 @@ class _CropScreenState extends State<CropScreen> {
       }
       processed = rotateQuarters(processed, draft.rotation);
       var enhanced = ImageProcessor.enhanceDocument(processed);
-      if (widget.selectedFilter != 'None') {
-        enhanced = ImageProcessor.filter(enhanced, widget.selectedFilter);
+      if (_selectedFilter != 'None') {
+        enhanced = ImageProcessor.filter(enhanced, _selectedFilter);
       }
       final id = pageId + i;
       final originalPath = '${dir.path}/$id-original.jpg';
@@ -673,7 +676,7 @@ class _CropScreenState extends State<CropScreen> {
         processedPath: processedPath,
         thumbPath: thumbPath,
         cropPoints: draft.cropPoints,
-        filter: widget.selectedFilter,
+        filter: _selectedFilter,
         rotation: draft.rotation,
         confidence: draft.confidence,
         width: enhanced.width,
@@ -776,9 +779,9 @@ class _CropScreenState extends State<CropScreen> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    widget.selectedFilter == 'None'
+                    _selectedFilter == 'None'
                         ? '应用文档增强'
-                        : '应用滤镜: ${widget.selectedFilter}',
+                        : '应用滤镜: $_selectedFilter',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
@@ -919,10 +922,10 @@ class _CropScreenState extends State<CropScreen> {
                   padding: const EdgeInsets.only(right: 8),
                   child: ChoiceChip(
                     label: Text(f == 'None' ? '原图' : (f == 'Enhanced' ? '增强' : f)),
-                    selected: widget.selectedFilter == f,
+                    selected: _selectedFilter == f,
                     onSelected: (_) {
+                      setState(() => _selectedFilter = f);
                       widget.onFilterChanged(f);
-                      setState(() {});
                     },
                   ),
                 ),
@@ -1100,6 +1103,40 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 
 
+  /// 对当前页重新应用滤镜：从原始图按存储的裁剪框/旋转重新裁剪->增强->滤镜，
+  /// 覆盖写回 processed/thumb，并把 filter 固定到该页（文档内的单独设置）。
+  Future<void> _applyFilter(String filter) async {
+    final meta = _meta;
+    if (meta == null || _busy) return;
+    final page = meta.pages[_index.clamp(0, meta.pages.length - 1)];
+    setState(() => _busy = true);
+    try {
+      final original = decodeImageBytes(await File(page.originalPath).readAsBytes());
+      final corners = [
+        for (final pair in page.cropPoints.split(';'))
+          if (pair.isNotEmpty) Point(double.parse(pair.split(',')[0]), double.parse(pair.split(',')[1])),
+      ];
+      RgbaImage processed = original;
+      if (corners.length == 4) {
+        processed = DocumentPerspectiveCorrector.crop(original, corners);
+      }
+      processed = rotateQuarters(processed, page.rotation);
+      var enhanced = ImageProcessor.enhanceDocument(processed);
+      if (filter != 'None') enhanced = ImageProcessor.filter(enhanced, filter);
+      await File(page.processedPath).writeAsBytes(encodeJpegBytes(enhanced));
+      await File(page.thumbPath).writeAsBytes(encodeJpegBytes(thumbOf(enhanced, 320)));
+      final updated = [...meta.pages];
+      updated[_index.clamp(0, meta.pages.length - 1)] = page.copyWithFilter(filter);
+      await DocumentStore.saveDocument(meta.copyWith(pages: updated));
+      if (mounted) setState(() {});
+      await _load();
+    } catch (e, stack) {
+      if (mounted) showErrorDialog(context, '应用滤镜失败', e, stack);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   /// 删除当前页（仅多页文档可用），页序号重排。
   Future<void> _deletePage() async {
     final meta = _meta;
@@ -1176,19 +1213,24 @@ class _EditorScreenState extends State<EditorScreen> {
               ],
             ),
       bottomNavigationBar: SafeArea(
-        // 滤镜在裁剪阶段选定后即固定（业务规则），编辑器仅展示当前滤镜，
-        // 不提供更改入口
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          child: Row(
-            children: [
-              Icon(Icons.filter_alt_outlined, size: 18, color: Theme.of(context).colorScheme.primary),
-              const SizedBox(width: 8),
-              Text(
-                '滤镜: ${page!.filter == 'None' ? '原图' : (page.filter == 'Enhanced' ? '增强' : page.filter)}（裁剪时选定）',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
+        // 文档级滤镜在裁剪阶段选定；此处可对当前页单独覆盖。
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (final f in ['None', 'Enhanced', 'Smart Gray', 'Magic Color', 'B&W', 'Ink', 'White Paper'])
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: ChoiceChip(
+                      label: Text(f == 'None' ? '原图' : (f == 'Enhanced' ? '增强' : f)),
+                      selected: page!.filter == f,
+                      onSelected: _busy ? null : (_) => _applyFilter(f),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
       ),

@@ -111,6 +111,24 @@ class StoredPage {
         'width': width,
         'height': height,
       };
+
+  /// 仅替换滤镜名（编辑器内单独设置某页滤镜时复用其余字段）。
+  StoredPage copyWithFilter(String filter) => StoredPage(
+        id: id,
+        pageIndex: pageIndex,
+        originalPath: originalPath,
+        processedPath: processedPath,
+        thumbPath: thumbPath,
+        cropPoints: cropPoints,
+        filter: filter,
+        brightness: brightness,
+        contrast: contrast,
+        saturation: saturation,
+        rotation: rotation,
+        confidence: confidence,
+        width: width,
+        height: height,
+      );
 }
 
 /// Document-level metadata, persisted as metadata.json inside each document folder.
