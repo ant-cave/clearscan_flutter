@@ -100,17 +100,10 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
       final file = await controller.takePicture();
       // 立即恢复快门可用，解码/检测在后台 isolate 进行，不阻塞连拍
       if (mounted) setState(() => _capturing = false);
-      // 后台 isolate：解码 + 检测都在非 UI 线程完成
+      // 后台 isolate：先在主 isolate 读字节，再传给顶层静态函数处理。
+      // 闭包绝不能捕获 State/controller（native 资源不可跨 isolate 发送）
       final bytes = await file.readAsBytes();
-      final img = await Isolate.run(() {
-        final mat = cv.imdecode(bytes, cv.IMREAD_COLOR);
-        if (mat.isEmpty) throw StateError('照片解码失败');
-        final rgba = cv.cvtColor(mat, cv.COLOR_BGR2RGBA);
-        final result = RgbaImage(Uint8List.fromList(rgba.data), rgba.cols, rgba.rows);
-        mat.dispose();
-        rgba.dispose();
-        return result;
-      });
+      final img = await Isolate.run(() => decodeCapture(bytes));
       final detection = DocumentEdgeDetector.detect(Uint8ListRgba(img.bytes, img.width, img.height));
       widget.onCaptured(CapturedPage(
         image: img,
@@ -158,15 +151,16 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
 
   Widget _buildCameraUi(BuildContext context) {
     final controller = _controller!;
-    // 用 AspectRatio 包裹预览，按传感器宽高比等比显示并裁切溢出部分，
-    // 避免直接铺满屏幕导致的画面拉伸
-    final previewAspect = controller.value.aspectRatio; // 宽/高（传感器方向）
+    // FittedBox(cover)：预览等比放大填满屏幕并裁掉溢出部分，
+    // 既不拉伸变形也不留黑边（不要用 AspectRatio——竖屏会压成横条）
     return Stack(
       fit: StackFit.expand,
       children: [
-        Center(
-          child: AspectRatio(
-            aspectRatio: previewAspect,
+        FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: controller.value.previewSize!.height,
+            height: controller.value.previewSize!.width,
             child: cam.CameraPreview(controller),
           ),
         ),
@@ -255,4 +249,17 @@ class _ShutterButton extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 顶层函数：在后台 isolate 中解码相机 JPEG 为 RGBA。
+/// 必须是顶层/静态且只依赖参数（不捕获 State/Controller），
+/// 否则 isolate spawn 会报 "object is unsendable"。
+RgbaImage decodeCapture(Uint8List bytes) {
+  final mat = cv.imdecode(bytes, cv.IMREAD_COLOR);
+  if (mat.isEmpty) throw StateError('照片解码失败');
+  final rgba = cv.cvtColor(mat, cv.COLOR_BGR2RGBA);
+  final result = RgbaImage(Uint8List.fromList(rgba.data), rgba.cols, rgba.rows);
+  mat.dispose();
+  rgba.dispose();
+  return result;
 }
