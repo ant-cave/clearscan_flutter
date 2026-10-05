@@ -317,12 +317,10 @@ class ImageProcessor {
 
   static RgbaImage blackAndWhite(RgbaImage bitmap, FilterParams params) {
     final balanced = grayWorldWhiteBalance(bitmap);
-    try {
-      final bw = _blackAndWhiteAdaptive(balanced, params.threshold, params.denoise);
-      return sharpen(bw, amount: .6 * params.sharpenScale);
-    } catch (_) {
-      return _blackAndWhiteFallback(balanced, params);
-    }
+    // 不再静默降级到 fallback：OpenCV 自适应阈值失败应当场报错，
+    // 否则用户会看到"滤镜已应用"但效果与预期完全不同
+    final bw = _blackAndWhiteAdaptive(balanced, params.threshold, params.denoise);
+    return sharpen(bw, amount: .6 * params.sharpenScale);
   }
 
   /// Local adaptive threshold (Gaussian) so uneven lighting doesn't collapse into blotches.
@@ -360,27 +358,6 @@ class ImageProcessor {
     } finally {
       src.dispose();
     }
-  }
-
-  static RgbaImage _blackAndWhiteFallback(RgbaImage bitmap, FilterParams params) {
-    final n = bitmap.width * bitmap.height;
-    final src = bitmap.bytes;
-    var sum = 0;
-    for (var i = 0; i < n; i++) {
-      final o = i * 4;
-      sum += (src[o] * 0.299 + src[o + 1] * 0.587 + src[o + 2] * 0.114).round();
-    }
-    // Global-threshold stand-in for the adaptive bias: the default 12 maps to the original -8 offset.
-    final biasOffset = 4 - params.threshold.toInt();
-    final threshold = ((sum / n).toInt() + biasOffset).clamp(96, 190);
-    final out = Uint8List(n * 4);
-    for (var i = 0; i < n; i++) {
-      final o = i * 4;
-      final lum = (src[o] * 0.299 + src[o + 1] * 0.587 + src[o + 2] * 0.114).round();
-      final value = lum > threshold ? 255 : 24;
-      out[o] = value; out[o + 1] = value; out[o + 2] = value; out[o + 3] = 255;
-    }
-    return sharpen(RgbaImage(out, bitmap.width, bitmap.height), amount: .6 * params.sharpenScale);
   }
 }
 

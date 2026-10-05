@@ -599,7 +599,17 @@ class _CropScreenState extends State<CropScreen> {
       });
       _loadPoints();
     } else {
-      await _finishAll();
+      try {
+        await _finishAll();
+      } catch (e) {
+        // 批处理失败：明确报错并留在裁剪页，让用户重试或调整角点
+        if (!mounted) return;
+        setState(() => _busy = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('处理失败: $e'),
+          duration: const Duration(seconds: 3),
+        ));
+      }
     }
   }
 
@@ -619,12 +629,13 @@ class _CropScreenState extends State<CropScreen> {
         for (final pair in draft.cropPoints.split(';'))
           Point(double.parse(pair.split(',')[0]), double.parse(pair.split(',')[1])),
       ];
-      // 先按角点在原图上裁剪，再应用旋转，保证坐标系一致
+      // 先按角点在原图上裁剪，再应用旋转，保证坐标系一致。
+      // 裁剪失败直接抛出，绝不静默降级为未裁剪的原图
       RgbaImage processed;
       try {
         processed = DocumentPerspectiveCorrector.crop(draft.original, corners);
-      } catch (_) {
-        processed = draft.original;
+      } catch (e) {
+        throw StateError('第 ${i + 1} 页裁剪失败: $e');
       }
       processed = rotateQuarters(processed, draft.rotation);
       var enhanced = ImageProcessor.enhanceDocument(processed);
@@ -958,11 +969,8 @@ class _EditorScreenState extends State<EditorScreen> {
           for (final pair in page.cropPoints.split(';'))
             Point(double.parse(pair.split(',')[0]), double.parse(pair.split(',')[1])),
         ];
-        try {
-          processed = DocumentPerspectiveCorrector.crop(original, corners);
-        } catch (_) {
-          processed = original;
-        }
+        // 裁剪失败直接抛出，由 catch 统一在 UI 报错，不静默降级
+        processed = DocumentPerspectiveCorrector.crop(original, corners);
       } else {
         processed = original;
       }

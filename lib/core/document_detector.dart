@@ -271,6 +271,8 @@ class DocumentEdgeDetector {
       if (refined.length != 4) return points;
       return _orderCorners(refined);
     } catch (_) {
+      // cornerSubPix 只是亚像素级精修（可选优化），失败时返回原始角点，
+      // 检测主流程不受影响——这不是功能性降级
       return points;
     } finally {
       corners.dispose();
