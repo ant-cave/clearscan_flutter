@@ -1,6 +1,7 @@
 // Camera capture screen - Dart port of CameraScreen.kt (CamScanner-style UI)
 // Copyright (c) 2026 ant-cave (AGPL-3.0-or-later), original Kotlin (c) SuiYueMengHen (MIT)
 import 'dart:async';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart' as cam;
@@ -42,9 +43,6 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
   String? _error;
   bool _capturing = false;
   int _capturedCount = 0;
-
-  Uint8List? _lastFrameBytes;
-  final int _lastFrameW = 0, _lastFrameH = 0;
 
   @override
   void initState() {
@@ -100,20 +98,19 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
         await Future<void>.delayed(const Duration(milliseconds: 350));
       } catch (_) {/* 设备不支持自动对焦则直接拍 */}
       final file = await controller.takePicture();
+      // 立即恢复快门可用，解码/检测在后台 isolate 进行，不阻塞连拍
+      if (mounted) setState(() => _capturing = false);
+      // 后台 isolate：解码 + 检测都在非 UI 线程完成
       final bytes = await file.readAsBytes();
-      // decode via opencv imdecode
-      final mat = cv.imdecode(bytes, cv.IMREAD_COLOR);
-      RgbaImage img;
-      if (mat.isEmpty) {
-        // fallback: use last preview frame
-        if (_lastFrameBytes == null) return;
-        img = RgbaImage(_lastFrameBytes!, _lastFrameW, _lastFrameH);
-      } else {
+      final img = await Isolate.run(() {
+        final mat = cv.imdecode(bytes, cv.IMREAD_COLOR);
+        if (mat.isEmpty) throw StateError('照片解码失败');
         final rgba = cv.cvtColor(mat, cv.COLOR_BGR2RGBA);
-        img = RgbaImage(Uint8List.fromList(rgba.data), rgba.cols, rgba.rows);
+        final result = RgbaImage(Uint8List.fromList(rgba.data), rgba.cols, rgba.rows);
         mat.dispose();
         rgba.dispose();
-      }
+        return result;
+      });
       final detection = DocumentEdgeDetector.detect(Uint8ListRgba(img.bytes, img.width, img.height));
       widget.onCaptured(CapturedPage(
         image: img,
@@ -121,16 +118,10 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
         detection: detection,
       ));
       _capturedCount++;
-      // 拍完恢复连续对焦，便于连续拍摄
-      try {
-        await controller.setFocusMode(cam.FocusMode.auto);
-      } catch (_) {/* 忽略 */}
-      if (widget.mode == CaptureMode.single && mounted) {
-        Navigator.of(context).pop();
-      }
+      if (mounted) setState(() {});
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Capture failed: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拍摄失败: $e')));
       }
     } finally {
       if (mounted) setState(() => _capturing = false);
@@ -167,10 +158,18 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
 
   Widget _buildCameraUi(BuildContext context) {
     final controller = _controller!;
+    // 用 AspectRatio 包裹预览，按传感器宽高比等比显示并裁切溢出部分，
+    // 避免直接铺满屏幕导致的画面拉伸
+    final previewAspect = controller.value.aspectRatio; // 宽/高（传感器方向）
     return Stack(
       fit: StackFit.expand,
       children: [
-        cam.CameraPreview(controller),
+        Center(
+          child: AspectRatio(
+            aspectRatio: previewAspect,
+            child: cam.CameraPreview(controller),
+          ),
+        ),
         // top bar
         SafeArea(
           child: Align(

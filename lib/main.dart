@@ -3,6 +3,7 @@
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
@@ -365,7 +366,7 @@ class _CaptureFlowScreenState extends State<CaptureFlowScreen> {
       _message = '已拍摄 ${_drafts.length} 页';
     });
     if (widget.mode == CaptureMode.single && mounted) {
-      // single mode: open crop immediately for the captured page
+      // single mode: 打开裁剪页；裁剪页关闭后 CaptureFlow 整体出栈回主界面
       _openCrop(_drafts.length - 1);
     } else if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -707,6 +708,19 @@ class _CropScreenState extends State<CropScreen> {
     }
   }
 
+  /// 复位裁剪框：四角归位到画面中央一半大小的矩形（不旋转坐标系）。
+  void _resetToCenterRect() {
+    setState(() {
+      _points = [
+        const Point(.25, .25),
+        const Point(.75, .25),
+        const Point(.75, .75),
+        const Point(.25, .75),
+      ];
+    });
+    _savePointsToDraft();
+  }
+
   /// Drag: convert display delta back to normalized source delta (inverse mapping).
   void _dragPoint(int i, Offset delta, double dispW, double dispH) {
     final dx = delta.dx / dispW;
@@ -733,6 +747,7 @@ class _CropScreenState extends State<CropScreen> {
       appBar: AppBar(
         title: Text('裁剪 ${_index + 1}/${widget.drafts.length}'),
         actions: [
+          IconButton(icon: const Icon(Icons.crop_free), onPressed: _resetToCenterRect, tooltip: '复位裁剪框'),
           IconButton(icon: const Icon(Icons.rotate_right), onPressed: _rotate, tooltip: '旋转'),
           TextButton(
             onPressed: _busy ? null : _next,
@@ -846,25 +861,16 @@ class _CropScreenState extends State<CropScreen> {
                   for (var i = 0; i < 4; i++) handle(i),
                   // 放大镜 + 准星：拖动角点时显示在画面内角点附近
                   if (_draggingIndex >= 0)
-                    Positioned(
-                      left: 0, top: 0,
-                      child: _MagnifierCrosshair(
-                        // 放大镜跟随被拖拽的角点，但不遮挡手指位置：
-                        // 向画面中心方向偏移
-                        imageFile: File(draft.thumbPath),
-                        imageWidth: draft.original.width.toDouble(),
-                        imageHeight: draft.original.height.toDouble(),
-                        sourceX: _magnifierX,
-                        sourceY: _magnifierY,
-                        anchorX: offX + _magnifierX,
-                        anchorY: offY + _magnifierY,
-                        displayWidth: dispW,
-                        displayHeight: dispH,
-                        boxWidth: boxW,
-                        boxHeight: boxH,
-                        size: _magnifierSize,
-                        zoom: _magnifierZoom,
-                      ),
+                    _MagnifierCrosshair(
+                      imageFile: File(draft.thumbPath),
+                      sourceX: _dispX(_points[_draggingIndex]),
+                      sourceY: _dispY(_points[_draggingIndex]),
+                      anchorX: offX + _magnifierX,
+                      anchorY: offY + _magnifierY,
+                      boxWidth: boxW,
+                      boxHeight: boxH,
+                      size: _magnifierSize,
+                      zoom: _magnifierZoom,
                     ),
                   if (widget.drafts.length > 1)
                     Positioned(
@@ -1242,36 +1248,29 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 }
 
+
 /// 拖动裁切角点时的放大镜 + 准星。
 ///
-/// 实现方式：圆形裁剪区域内嵌 [Image.file]，通过 `Alignment` 让被拖拽角点
-/// 对应的源图位置保持在放大镜中心，再叠加准星与十字线绘制。
-/// 显示图（thumb，最长 640px）与原图同构，坐标按归一化比例对应。
+/// 实现：[FutureBuilder] 解码 thumb 图后交给 [CustomPainter]，painter 直接
+/// 用 drawImageRect 把角点周围的小区域拉伸画满整个圆形区域——源/目标矩形
+/// 都是显式计算，图像必然跟随角点移动且放大倍数精确。
 class _MagnifierCrosshair extends StatelessWidget {
   final File imageFile;
-  final double imageWidth; // 原图尺寸（仅用于归一化换算）
-  final double imageHeight;
-  final double sourceX; // 角点在显示空间的归一化位置 (0..1)
+  final double sourceX; // 角点在显示图中的归一化位置 (0..1)
   final double sourceY;
   final double anchorX; // 角点在画面中的绝对坐标
   final double anchorY;
-  final double displayWidth;
-  final double displayHeight;
-  final double boxWidth; // 整个裁剪画面尺寸（用于把放大镜推离手指）
+  final double boxWidth; // 裁剪画面尺寸（放大镜从手指位置向中心避让）
   final double boxHeight;
-  final double size; // 放大镜直径
-  final double zoom; // 放大倍数
+  final double size; // 放大镜直径（逻辑像素）
+  final double zoom; // 放大倍数：镜内 1 逻辑像素 = 源图 1/zoom 像素
 
   const _MagnifierCrosshair({
     required this.imageFile,
-    required this.imageWidth,
-    required this.imageHeight,
     required this.sourceX,
     required this.sourceY,
     required this.anchorX,
     required this.anchorY,
-    required this.displayWidth,
-    required this.displayHeight,
     required this.boxWidth,
     required this.boxHeight,
     required this.size,
@@ -1280,59 +1279,108 @@ class _MagnifierCrosshair extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 放大镜中心位置：从角点向画面中心方向偏移，避免遮挡手指与角点本身
+    // 放大镜中心：从角点沿指向画面中心的方向偏移，避免遮挡手指
     final centerX = boxWidth / 2;
     final centerY = boxHeight / 2;
     final dirX = centerX - anchorX;
     final dirY = centerY - anchorY;
     final len = math.sqrt(dirX * dirX + dirY * dirY);
     final norm = len > 1 ? 1.0 / len : 0.0;
-    final mgX = (anchorX + dirX * norm * (size / 2 + 70)).clamp(size / 2 + 4, boxWidth - size / 2 - 4);
-    final mgY = (anchorY + dirY * norm * (size / 2 + 70)).clamp(size / 2 + 4, boxHeight - size / 2 - 4);
+    final offset = size / 2 + 56;
+    final mgX = (anchorX + dirX * norm * offset).clamp(size / 2 + 4, boxWidth - size / 2 - 4);
+    final mgY = (anchorY + dirY * norm * offset).clamp(size / 2 + 4, boxHeight - size / 2 - 4);
 
-    // 显示图内容与显示区域的宽高比一致（BoxFit.fill），因此
-    // 归一化角点位置直接对应显示图内的相对位置。
-    // Image 用 BoxFit.cover + Alignment 将目标点放大居中：
-    // alignment 取值范围 -1..1，-1 表示对齐左/上，1 表示右/下。
-    final alignX = (sourceX * 2 - 1).clamp(-1.0, 1.0);
-    final alignY = (sourceY * 2 - 1).clamp(-1.0, 1.0);
-
-    return Transform.translate(
-      offset: Offset(mgX - size / 2, mgY - size / 2 - size * 0.4),
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(color: Colors.white, width: 3),
-          boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 8, spreadRadius: 1)],
-        ),
-        child: ClipOval(
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              // 放大内容：thumb 图按 3x 显示，把角点位置对到中心
-              FittedBox(
-                fit: BoxFit.cover,
-                clipBehavior: Clip.hardEdge,
-                child: SizedBox(
-                  width: displayWidth * zoom,
-                  height: displayHeight * zoom,
-                  child: Image.file(
-                    imageFile,
-                    fit: BoxFit.fill,
-                    alignment: Alignment(alignX, alignY),
+    return Positioned(
+      left: 0,
+      top: 0,
+      child: Transform.translate(
+        offset: Offset(mgX - size / 2, mgY - size / 2),
+        child: Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 3),
+            boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 8, spreadRadius: 1)],
+          ),
+          child: ClipOval(
+            child: FutureBuilder<ui.Image>(
+              future: _loadImage(),
+              builder: (context, snapshot) {
+                if (!snapshot.hasData) {
+                  return const ColoredBox(color: Colors.black38);
+                }
+                return CustomPaint(
+                  painter: _MagnifierPainter(
+                    image: snapshot.data!,
+                    sourceX: sourceX,
+                    sourceY: sourceY,
+                    zoom: zoom,
                   ),
-                ),
-              ),
-              // 准星 + 十字参考线
-              const CustomPaint(painter: _CrosshairPainter()),
-            ],
+                  child: const CustomPaint(painter: _CrosshairPainter()),
+                );
+              },
+            ),
           ),
         ),
       ),
     );
   }
+
+  /// 解码并缓存 thumb 图（同一文件多次进入只解码一次）。
+  static ui.Image? _cached;
+  static String? _cachedPath;
+
+  Future<ui.Image> _loadImage() async {
+    final path = imageFile.path;
+    if (_cached != null && _cachedPath == path) return _cached!;
+    final bytes = await imageFile.readAsBytes();
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    _cached = frame.image;
+    _cachedPath = path;
+    return _cached!;
+  }
+}
+
+/// 放大镜核心绘制：把角点周围 size/zoom 的源图区域画满整个圆形画布。
+class _MagnifierPainter extends CustomPainter {
+  final ui.Image image;
+  final double sourceX;
+  final double sourceY;
+  final double zoom;
+
+  const _MagnifierPainter({
+    required this.image,
+    required this.sourceX,
+    required this.sourceY,
+    required this.zoom,
+  });
+
+  @override
+  void paint(Canvas canvas, Size canvasSize) {
+    // 角点在 thumb 位图中的像素坐标（显示图与位图同构，归一化坐标直接映射）
+    final px = sourceX * image.width;
+    final py = sourceY * image.height;
+    // 取角点周围一个正方形源区域，放大后恰好填满画布
+    final srcHalf = canvasSize.width / zoom / 2;
+    final src = Rect.fromCenter(
+      center: Offset(px, py),
+      width: srcHalf * 2,
+      height: srcHalf * 2,
+    );
+    // 源区域可能越出位图边界：向内平移使其完整落在位图内
+    final dx = src.left < 0 ? -src.left : (src.right > image.width.toDouble() ? image.width.toDouble() - src.right : 0.0);
+    final dy = src.top < 0 ? -src.top : (src.bottom > image.height.toDouble() ? image.height.toDouble() - src.bottom : 0.0);
+    final clampedSrc = src.shift(Offset(dx, dy));
+    final dst = Offset.zero & canvasSize;
+    final paint = Paint()..filterQuality = FilterQuality.medium;
+    canvas.drawImageRect(image, clampedSrc, dst, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _MagnifierPainter old) =>
+      old.sourceX != sourceX || old.sourceY != sourceY || old.image != image;
 }
 
 /// 放大镜内的准星绘制：中心圆点 + 上下左右短刻线。
@@ -1347,12 +1395,10 @@ class _CrosshairPainter extends CustomPainter {
       ..strokeWidth = 1.5
       ..style = PaintingStyle.stroke;
     const gap = 8.0, len = 12.0;
-    // 上下左右刻线
     canvas.drawLine(c.translate(0, -gap - len), c.translate(0, -gap), paintLine);
     canvas.drawLine(c.translate(0, gap), c.translate(0, gap + len), paintLine);
     canvas.drawLine(c.translate(-gap - len, 0), c.translate(-gap, 0), paintLine);
     canvas.drawLine(c.translate(gap, 0), c.translate(gap + len, 0), paintLine);
-    // 中心准星圆
     canvas.drawCircle(c, 6.5, paintLine);
     canvas.drawCircle(c, 1.5, Paint()..color = const Color(0xFF00E5FF));
   }
