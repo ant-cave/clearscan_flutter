@@ -1,6 +1,7 @@
 // ClearScan Flutter - main app: home list, capture flow, editor, export
 // Copyright (c) 2026 ant-cave (AGPL-3.0-or-later), original Kotlin (c) SuiYueMengHen (MIT)
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -556,6 +557,16 @@ class _CropScreenState extends State<CropScreen> {
   int _rotation = 0;
   bool _busy = false;
 
+  // 放大镜状态：当前拖拽的角点索引（-1 = 未拖拽）
+  int _draggingIndex = -1;
+  // 放大镜中心在画面坐标系（display space）中的位置
+  double _magnifierX = 0, _magnifierY = 0;
+  // 手柄与放大镜的尺寸常量
+  static const double _handleVisualSize = 36;
+  static const double _handleTouchSize = 64;
+  static const double _magnifierSize = 120;
+  static const double _magnifierZoom = 3.0;
+
   @override
   void initState() {
     super.initState();
@@ -709,6 +720,9 @@ class _CropScreenState extends State<CropScreen> {
     }
     setState(() {
       _points[i] = Point(nx.clamp(0.0, 1.0), ny.clamp(0.0, 1.0));
+      _draggingIndex = i;
+      _magnifierX = _dispX(_points[i]) * dispW;
+      _magnifierY = _dispY(_points[i]) * dispH;
     });
   }
 
@@ -750,23 +764,44 @@ class _CropScreenState extends State<CropScreen> {
               final offY = (boxH - dispH) / 2;
 
               Widget handle(int i) {
+                final cx = offX + _dispX(_points[i]) * dispW;
+                final cy = offY + _dispY(_points[i]) * dispH;
                 return Positioned(
                   left: 0, top: 0,
                   child: Transform.translate(
+                    // 视觉手柄居中于角点；GestureDetector 比视觉大一圈（透明填充），
+                    // 保证角落位置也有足够大的触控热区
                     offset: Offset(
-                      offX + _dispX(_points[i]) * dispW - 16,
-                      offY + _dispY(_points[i]) * dispH - 16,
+                      cx - _handleVisualSize / 2,
+                      cy - _handleVisualSize / 2,
                     ),
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
-                      onPanUpdate: (d) => setState(() => _dragPoint(i, d.delta, dispW, dispH)),
-                      onPanEnd: (_) => _savePointsToDraft(),
+                      onPanStart: (_) => setState(() => _draggingIndex = i),
+                      onPanUpdate: (d) => _dragPoint(i, d.delta, dispW, dispH),
+                      onPanEnd: (_) {
+                        _savePointsToDraft();
+                        setState(() => _draggingIndex = -1);
+                      },
+                      onPanCancel: () => setState(() => _draggingIndex = -1),
                       child: Container(
-                        width: 32, height: 32,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Colors.white.withValues(alpha: .85),
-                          border: Border.all(color: Theme.of(context).colorScheme.primary, width: 3),
+                        // 触控热区 64px（Material 建议最小 48px），视觉圆 36px
+                        width: _handleTouchSize,
+                        height: _handleTouchSize,
+                        color: Colors.transparent,
+                        alignment: Alignment.center,
+                        child: Container(
+                          width: _handleVisualSize,
+                          height: _handleVisualSize,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Colors.white.withValues(alpha: .85),
+                            border: Border.all(
+                              color: Theme.of(context).colorScheme.primary,
+                              width: 3,
+                            ),
+                            boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                          ),
                         ),
                       ),
                     ),
@@ -809,6 +844,28 @@ class _CropScreenState extends State<CropScreen> {
                   ),
                   // corner handles
                   for (var i = 0; i < 4; i++) handle(i),
+                  // 放大镜 + 准星：拖动角点时显示在画面内角点附近
+                  if (_draggingIndex >= 0)
+                    Positioned(
+                      left: 0, top: 0,
+                      child: _MagnifierCrosshair(
+                        // 放大镜跟随被拖拽的角点，但不遮挡手指位置：
+                        // 向画面中心方向偏移
+                        imageFile: File(draft.thumbPath),
+                        imageWidth: draft.original.width.toDouble(),
+                        imageHeight: draft.original.height.toDouble(),
+                        sourceX: _magnifierX,
+                        sourceY: _magnifierY,
+                        anchorX: offX + _magnifierX,
+                        anchorY: offY + _magnifierY,
+                        displayWidth: dispW,
+                        displayHeight: dispH,
+                        boxWidth: boxW,
+                        boxHeight: boxH,
+                        size: _magnifierSize,
+                        zoom: _magnifierZoom,
+                      ),
+                    ),
                   if (widget.drafts.length > 1)
                     Positioned(
                       left: 12, bottom: 12,
@@ -1183,4 +1240,123 @@ class _EditorScreenState extends State<EditorScreen> {
       ),
     );
   }
+}
+
+/// 拖动裁切角点时的放大镜 + 准星。
+///
+/// 实现方式：圆形裁剪区域内嵌 [Image.file]，通过 `Alignment` 让被拖拽角点
+/// 对应的源图位置保持在放大镜中心，再叠加准星与十字线绘制。
+/// 显示图（thumb，最长 640px）与原图同构，坐标按归一化比例对应。
+class _MagnifierCrosshair extends StatelessWidget {
+  final File imageFile;
+  final double imageWidth; // 原图尺寸（仅用于归一化换算）
+  final double imageHeight;
+  final double sourceX; // 角点在显示空间的归一化位置 (0..1)
+  final double sourceY;
+  final double anchorX; // 角点在画面中的绝对坐标
+  final double anchorY;
+  final double displayWidth;
+  final double displayHeight;
+  final double boxWidth; // 整个裁剪画面尺寸（用于把放大镜推离手指）
+  final double boxHeight;
+  final double size; // 放大镜直径
+  final double zoom; // 放大倍数
+
+  const _MagnifierCrosshair({
+    required this.imageFile,
+    required this.imageWidth,
+    required this.imageHeight,
+    required this.sourceX,
+    required this.sourceY,
+    required this.anchorX,
+    required this.anchorY,
+    required this.displayWidth,
+    required this.displayHeight,
+    required this.boxWidth,
+    required this.boxHeight,
+    required this.size,
+    required this.zoom,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // 放大镜中心位置：从角点向画面中心方向偏移，避免遮挡手指与角点本身
+    final centerX = boxWidth / 2;
+    final centerY = boxHeight / 2;
+    final dirX = centerX - anchorX;
+    final dirY = centerY - anchorY;
+    final len = math.sqrt(dirX * dirX + dirY * dirY);
+    final norm = len > 1 ? 1.0 / len : 0.0;
+    final mgX = (anchorX + dirX * norm * (size / 2 + 70)).clamp(size / 2 + 4, boxWidth - size / 2 - 4);
+    final mgY = (anchorY + dirY * norm * (size / 2 + 70)).clamp(size / 2 + 4, boxHeight - size / 2 - 4);
+
+    // 显示图内容与显示区域的宽高比一致（BoxFit.fill），因此
+    // 归一化角点位置直接对应显示图内的相对位置。
+    // Image 用 BoxFit.cover + Alignment 将目标点放大居中：
+    // alignment 取值范围 -1..1，-1 表示对齐左/上，1 表示右/下。
+    final alignX = (sourceX * 2 - 1).clamp(-1.0, 1.0);
+    final alignY = (sourceY * 2 - 1).clamp(-1.0, 1.0);
+
+    return Transform.translate(
+      offset: Offset(mgX - size / 2, mgY - size / 2 - size * 0.4),
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 3),
+          boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 8, spreadRadius: 1)],
+        ),
+        child: ClipOval(
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              // 放大内容：thumb 图按 3x 显示，把角点位置对到中心
+              FittedBox(
+                fit: BoxFit.cover,
+                clipBehavior: Clip.hardEdge,
+                child: SizedBox(
+                  width: displayWidth * zoom,
+                  height: displayHeight * zoom,
+                  child: Image.file(
+                    imageFile,
+                    fit: BoxFit.fill,
+                    alignment: Alignment(alignX, alignY),
+                  ),
+                ),
+              ),
+              // 准星 + 十字参考线
+              const CustomPaint(painter: _CrosshairPainter()),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 放大镜内的准星绘制：中心圆点 + 上下左右短刻线。
+class _CrosshairPainter extends CustomPainter {
+  const _CrosshairPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = Offset(size.width / 2, size.height / 2);
+    final paintLine = Paint()
+      ..color = const Color(0xCC00E5FF)
+      ..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke;
+    const gap = 8.0, len = 12.0;
+    // 上下左右刻线
+    canvas.drawLine(c.translate(0, -gap - len), c.translate(0, -gap), paintLine);
+    canvas.drawLine(c.translate(0, gap), c.translate(0, gap + len), paintLine);
+    canvas.drawLine(c.translate(-gap - len, 0), c.translate(-gap, 0), paintLine);
+    canvas.drawLine(c.translate(gap, 0), c.translate(gap + len, 0), paintLine);
+    // 中心准星圆
+    canvas.drawCircle(c, 6.5, paintLine);
+    canvas.drawCircle(c, 1.5, Paint()..color = const Color(0xFF00E5FF));
+  }
+
+  @override
+  bool shouldRepaint(covariant _CrosshairPainter oldDelegate) => false;
 }

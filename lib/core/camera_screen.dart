@@ -59,8 +59,21 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
         (c) => c.lensDirection == cam.CameraLensDirection.back,
         orElse: () => _cameras.first,
       );
-      final controller = cam.CameraController(back, cam.ResolutionPreset.high, enableAudio: false);
+      // max：向系统请求传感器支持的最大分辨率，吃满硬件
+      final controller = cam.CameraController(back, cam.ResolutionPreset.max, enableAudio: false);
       await controller.initialize();
+      if (!mounted) return;
+      // 开启连续自动对焦与自动曝光（硬件支持时），保证文档边缘始终清晰
+      try {
+        await controller.setFocusMode(cam.FocusMode.auto);
+      } catch (_) {/* 设备不支持连续对焦则保持默认 */}
+      try {
+        await controller.setExposureMode(cam.ExposureMode.auto);
+      } catch (_) {/* 不支持则保持默认 */}
+      // 高分辨率下对焦速度慢，延长自动对焦稳定时间
+      try {
+        await controller.setFlashMode(cam.FlashMode.off);
+      } catch (_) {/* 无闪光灯的设备 */}
       if (!mounted) return;
       setState(() {
         _controller = controller;
@@ -80,6 +93,12 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
     if (controller == null || _capturing) return;
     setState(() => _capturing = true);
     try {
+      // 拍照前锁定一次对焦/曝光，让传感器有足够时间合焦，
+      // 这对文档场景（大面积平面、低纹理）尤其重要
+      try {
+        await controller.setFocusMode(cam.FocusMode.auto);
+        await Future<void>.delayed(const Duration(milliseconds: 350));
+      } catch (_) {/* 设备不支持自动对焦则直接拍 */}
       final file = await controller.takePicture();
       final bytes = await file.readAsBytes();
       // decode via opencv imdecode
@@ -102,6 +121,10 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
         detection: detection,
       ));
       _capturedCount++;
+      // 拍完恢复连续对焦，便于连续拍摄
+      try {
+        await controller.setFocusMode(cam.FocusMode.auto);
+      } catch (_) {/* 忽略 */}
       if (widget.mode == CaptureMode.single && mounted) {
         Navigator.of(context).pop();
       }
