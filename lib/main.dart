@@ -613,14 +613,11 @@ class _CropScreenState extends State<CropScreen> {
     } else {
       try {
         await _finishAll();
-      } catch (e) {
+      } catch (e, stack) {
         // 批处理失败：明确报错并留在裁剪页，让用户重试或调整角点
         if (!mounted) return;
         setState(() => _busy = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('处理失败: $e'),
-          duration: const Duration(seconds: 3),
-        ));
+        showErrorDialog(context, '处理失败', e, stack);
       }
     }
   }
@@ -1067,12 +1064,9 @@ class _EditorScreenState extends State<EditorScreen> {
           duration: const Duration(seconds: 1),
         ));
       }
-    } catch (e) {
+    } catch (e, stack) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('滤镜处理失败: $e'),
-          duration: const Duration(seconds: 2),
-        ));
+        showErrorDialog(context, '滤镜处理失败', e, stack);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -1110,9 +1104,9 @@ class _EditorScreenState extends State<EditorScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('图片已保存: ${file.path}')));
       }
-    } catch (e) {
+    } catch (e, stack) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存失败: $e')));
+        showErrorDialog(context, '保存失败', e, stack);
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -1142,9 +1136,9 @@ class _EditorScreenState extends State<EditorScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('PDF 已导出: ${file.path}')));
       }
-    } catch (e) {
+    } catch (e, stack) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出失败: $e')));
+        showErrorDialog(context, '导出失败', e, stack);
       }
     } finally {
       if (mounted) setState(() => _busy = false);

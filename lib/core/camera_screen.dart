@@ -1,11 +1,10 @@
 // Camera capture screen - Dart port of CameraScreen.kt (CamScanner-style UI)
 // Copyright (c) 2026 ant-cave (AGPL-3.0-or-later), original Kotlin (c) SuiYueMengHen (MIT)
 import 'dart:async';
-import 'dart:isolate';
-import 'dart:typed_data';
 
 import 'package:camera/camera.dart' as cam;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
 import 'document_detector.dart';
@@ -98,12 +97,13 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
         await Future<void>.delayed(const Duration(milliseconds: 350));
       } catch (_) {/* 设备不支持自动对焦则直接拍 */}
       final file = await controller.takePicture();
-      // 立即恢复快门可用，解码/检测在后台 isolate 进行，不阻塞连拍
+      // 立即恢复快门可用；后续解码为 native 快速调用，在主 isolate 同步完成。
+      // 注意：不要在此方法内使用 Isolate.run——async 方法中的闭包会捕获
+      // 方法上下文（含 CameraController/_Future），跨 isolate 发送必然报
+      // "object is unsendable"。后台化需要 Isolate.spawn + 顶层 entrypoint。
       if (mounted) setState(() => _capturing = false);
-      // 后台 isolate：先在主 isolate 读字节，再传给顶层静态函数处理。
-      // 闭包绝不能捕获 State/controller（native 资源不可跨 isolate 发送）
       final bytes = await file.readAsBytes();
-      final img = await Isolate.run(() => decodeCapture(bytes));
+      final img = decodeCapture(bytes);
       final detection = DocumentEdgeDetector.detect(Uint8ListRgba(img.bytes, img.width, img.height));
       widget.onCaptured(CapturedPage(
         image: img,
@@ -114,7 +114,7 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
       if (mounted) setState(() {});
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拍摄失败: $e')));
+        showErrorDialog(context, '拍摄失败', e);
       }
     } finally {
       if (mounted) setState(() => _capturing = false);
@@ -262,4 +262,42 @@ RgbaImage decodeCapture(Uint8List bytes) {
   mat.dispose();
   rgba.dispose();
   return result;
+}
+
+/// 通用错误弹窗：不自动消失（模态对话框），提供一键复制完整报错到剪贴板。
+/// 所有面向用户的失败路径都应使用它，代替自动收回的 SnackBar，
+/// 便于用户把报错完整反馈给开发者。
+Future<void> showErrorDialog(BuildContext context, String title, Object error, [StackTrace? stack]) {
+  final text = '$title\n$error${stack == null ? '' : '\n$stack'}';
+  return showDialog<void>(
+    context: context,
+    barrierDismissible: false, // 点击遮罩不关闭，必须显式操作
+    builder: (ctx) => AlertDialog(
+      title: Text(title),
+      content: SingleChildScrollView(
+        child: SelectableText(
+          text,
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+        ),
+      ),
+      actions: [
+        TextButton.icon(
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: text));
+            if (ctx.mounted) {
+              ScaffoldMessenger.of(ctx).showSnackBar(
+                const SnackBar(content: Text('报错已复制到剪贴板'), duration: Duration(seconds: 2)),
+              );
+            }
+          },
+          icon: const Icon(Icons.copy, size: 18),
+          label: const Text('复制报错'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(ctx).pop(),
+          child: const Text('关闭'),
+        ),
+      ],
+    ),
+  );
 }
