@@ -2,7 +2,6 @@
 // Copyright (c) 2026 ant-cave (AGPL-3.0-or-later), original Kotlin (c) SuiYueMengHen (MIT)
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -347,11 +346,11 @@ class _CaptureFlowScreenState extends State<CaptureFlowScreen> {
     final sessionDir = Directory('${dir.path}/draft-${DateTime.now().millisecondsSinceEpoch ~/ 100000}');
     await sessionDir.create(recursive: true);
     final thumbFile = File('${sessionDir.path}/$idBase-thumb.jpg');
-    await thumbFile.writeAsBytes(encodeJpegBytes(thumbOf(page.image, 640)));
+    // 缩略图与边缘检测已在后台 isolate 完成（见 camera_screen.dart），主线程只写文件
+    await thumbFile.writeAsBytes(page.thumbBytes);
 
-    // post-capture detection (single-shot, matching original onCapture path)
-    final detection = DocumentEdgeDetector.detect(Uint8ListRgba(page.image.bytes, page.image.width, page.image.height));
-    final corners = (detection.status == DocumentDetectionStatus.detected && detection.corners.length == 4)
+    final detection = page.detection;
+    final corners = (detection != null && detection.status == DocumentDetectionStatus.detected && detection.corners.length == 4)
         ? detection.corners
         : defaultCropPoints(page.image.width, page.image.height);
     final draft = DraftPage(
@@ -359,7 +358,7 @@ class _CaptureFlowScreenState extends State<CaptureFlowScreen> {
       original: page.image,
       thumbPath: thumbFile.path,
       cropPoints: corners.map((p) => '${p.x},${p.y}').join(';'),
-      confidence: detection.corners.length == 4 ? detection.confidence : 0,
+      confidence: (detection != null && detection.corners.length == 4) ? detection.confidence : 0,
     );
     setState(() {
       _drafts.add(draft);
@@ -444,24 +443,6 @@ class _CaptureFlowScreenState extends State<CaptureFlowScreen> {
 /// Mirrors the original ClearScan rule: single Document captures jump straight
 /// to the crop screen; multi mode keeps accumulating drafts.
 bool shouldOpenCropAfterCapture(CaptureMode mode) => mode == CaptureMode.single;
-
-RgbaImage thumbOf(RgbaImage src, int maxSide) {
-  final scale = maxSide / (src.width > src.height ? src.width : src.height);
-  if (scale >= 1) return src;
-  final w = (src.width * scale).round(), h = (src.height * scale).round();
-  final out = Uint8List(w * h * 4);
-  for (var y = 0; y < h; y++) {
-    final sy = (y / scale).round().clamp(0, src.height - 1);
-    for (var x = 0; x < w; x++) {
-      final sx = (x / scale).round().clamp(0, src.width - 1);
-      final so = (sy * src.width + sx) * 4;
-      final o = (y * w + x) * 4;
-      out[o] = src.bytes[so]; out[o + 1] = src.bytes[so + 1];
-      out[o + 2] = src.bytes[so + 2]; out[o + 3] = 255;
-    }
-  }
-  return RgbaImage(out, w, h);
-}
 
 /// Album import: loads picked images as drafts and opens the same crop flow.
 class GalleryImportScreen extends StatefulWidget {

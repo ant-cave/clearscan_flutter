@@ -1,6 +1,7 @@
 // Camera capture screen - Dart port of CameraScreen.kt (CamScanner-style UI)
 // Copyright (c) 2026 ant-cave (AGPL-3.0-or-later), original Kotlin (c) SuiYueMengHen (MIT)
 import 'dart:async';
+import 'dart:isolate';
 
 import 'package:camera/camera.dart' as cam;
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:opencv_dart/opencv_dart.dart' as cv;
 
 import 'document_detector.dart';
+import 'image_codec.dart';
 import 'perspective.dart';
 
 enum CaptureMode { single, multiple }
@@ -16,7 +18,13 @@ class CapturedPage {
   final RgbaImage image;
   final List<Point> corners; // may be empty if detection failed
   final DocumentDetectionResult? detection;
-  CapturedPage({required this.image, this.corners = const [], this.detection});
+  final List<int> thumbBytes; // 缩略图 JPEG，后台 isolate 已生成
+  CapturedPage({
+    required this.image,
+    this.corners = const [],
+    this.detection,
+    this.thumbBytes = const [],
+  });
 }
 
 class CameraCaptureScreen extends StatefulWidget {
@@ -40,8 +48,10 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
   List<cam.CameraDescription> _cameras = const [];
   bool _initializing = true;
   String? _error;
-  bool _capturing = false;
-  int _capturedCount = 0;
+  bool _torchOn = false;
+  bool _flash = false; // 按下快门瞬间的白屏提示
+  bool _taking = false; // 仅锁住 takePicture，不阻塞 UI
+  int _shots = 0; // 按下快门即 +1，给用户即时反馈
 
   @override
   void initState() {
@@ -87,38 +97,74 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
 
   Future<void> _capture() async {
     final controller = _controller;
-    if (controller == null || _capturing) return;
-    setState(() => _capturing = true);
+    if (controller == null || _taking) return; // 仅锁 takePicture，不弹转圈
+    _taking = true;
+    // 按下快门立刻给用户反馈：白屏闪一下 + 计数 +1，完全不等后台处理
+    if (mounted) {
+      setState(() {
+        _shots++;
+        _flash = true;
+      });
+      Future.delayed(const Duration(milliseconds: 120), () {
+        if (mounted) setState(() => _flash = false);
+      });
+    }
+    // 拍照前锁定一次对焦/曝光，让传感器有足够时间合焦
     try {
-      // 拍照前锁定一次对焦/曝光，让传感器有足够时间合焦，
-      // 这对文档场景（大面积平面、低纹理）尤其重要
       try {
         await controller.setFocusMode(cam.FocusMode.auto);
         await Future<void>.delayed(const Duration(milliseconds: 350));
       } catch (_) {/* 设备不支持自动对焦则直接拍 */}
       final file = await controller.takePicture();
-      // 立即恢复快门可用；后续解码为 native 快速调用，在主 isolate 同步完成。
-      // 注意：不要在此方法内使用 Isolate.run——async 方法中的闭包会捕获
-      // 方法上下文（含 CameraController/_Future），跨 isolate 发送必然报
-      // "object is unsendable"。后台化需要 Isolate.spawn + 顶层 entrypoint。
-      if (mounted) setState(() => _capturing = false);
       final bytes = await file.readAsBytes();
-      final img = decodeCapture(bytes);
-      final detection = DocumentEdgeDetector.detect(Uint8ListRgba(img.bytes, img.width, img.height));
+      _processAndDeliver(bytes); // 后台继续，不阻塞快门与下一次拍摄
+    } catch (e) {
+      if (mounted) showErrorDialog(context, '拍摄失败', e);
+    } finally {
+      _taking = false;
+    }
+  }
+
+  /// 后台处理链路：isolate 解码 + 检测 + 缩略图，完成后回传给上层。
+  /// 设计为“即发即忘”，不阻塞快门按钮。
+  Future<void> _processAndDeliver(Uint8List bytes) async {
+    try {
+      // 解码 + 边缘检测是重 CPU 流水线（全分辨率 imdecode + 整套 OpenCV 检测），
+      // 必须在后台 isolate 执行，否则主线程冻结、UI 卡死。
+      // 只传 Uint8List（可发送），用顶层函数避免闭包捕获不可发送的上下文。
+      final result = await processCaptureAsync(bytes);
+      if (!mounted) return;
+      final img = RgbaImage(result['rgba'] as Uint8List, result['width'] as int, result['height'] as int);
+      final flat = (result['corners'] as List).cast<double>();
+      final corners = [for (var i = 0; i < flat.length; i += 2) Point(flat[i], flat[i + 1])];
+      final detection = DocumentDetectionResult(
+        corners: corners,
+        confidence: result['confidence'] as double,
+        status: DocumentDetectionStatus.values[result['statusIndex'] as int],
+        processingMs: result['processingMs'] as int,
+        candidateCount: result['candidateCount'] as int,
+        reason: result['reason'] as String?,
+      );
       widget.onCaptured(CapturedPage(
         image: img,
         corners: detection.corners,
         detection: detection,
+        thumbBytes: Uint8List.fromList(result['thumb'] as List<int>),
       ));
-      _capturedCount++;
       if (mounted) setState(() {});
     } catch (e) {
-      if (mounted) {
-        showErrorDialog(context, '拍摄失败', e);
-      }
-    } finally {
-      if (mounted) setState(() => _capturing = false);
+      if (mounted) showErrorDialog(context, '处理失败', e);
     }
+  }
+
+  Future<void> _toggleTorch() async {
+    final controller = _controller;
+    if (controller == null) return;
+    try {
+      final next = !_torchOn;
+      await controller.setFlashMode(next ? cam.FlashMode.torch : cam.FlashMode.off);
+      if (mounted) setState(() => _torchOn = next);
+    } catch (_) {/* 设备不支持常亮闪光则忽略 */}
   }
 
   @override
@@ -157,7 +203,9 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
       fit: StackFit.expand,
       children: [
         FittedBox(
-          fit: BoxFit.cover,
+          // contain：完整显示传感器取景框（不裁切放大），所见即所得，
+          // 避免 cover 把预览放大裁切，导致实际照片四周还有更多内容。
+          fit: BoxFit.contain,
           child: SizedBox(
             width: controller.value.previewSize!.height,
             height: controller.value.previewSize!.width,
@@ -177,6 +225,14 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
                     icon: const Icon(Icons.close, color: Colors.white, size: 28),
                     onPressed: widget.onClose,
                   ),
+                  IconButton(
+                    icon: Icon(
+                      _torchOn ? Icons.flash_on : Icons.flash_off,
+                      color: _torchOn ? Colors.yellow : Colors.white,
+                      size: 26,
+                    ),
+                    onPressed: _toggleTorch,
+                  ),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     decoration: BoxDecoration(
@@ -184,7 +240,7 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
                       borderRadius: BorderRadius.circular(16),
                     ),
                     child: Text(
-                      widget.mode == CaptureMode.single ? 'Single' : 'Multiple ($_capturedCount)',
+                      widget.mode == CaptureMode.single ? 'Single' : '已拍 $_shots 张',
                       style: const TextStyle(color: Colors.white),
                     ),
                   ),
@@ -205,7 +261,7 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
                 children: [
                   const SizedBox(width: 72),
                   _ShutterButton(
-                    busy: _capturing,
+                    busy: _taking,
                     onTap: _capture,
                   ),
                   const SizedBox(width: 72),
@@ -214,6 +270,9 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
             ),
           ),
         ),
+        // 按下快门瞬间的白屏闪一下的反馈，纯视觉、不阻塞
+        if (_flash)
+          Container(color: Colors.white),
       ],
     );
   }
@@ -242,26 +301,60 @@ class _ShutterButton extends StatelessWidget {
             shape: BoxShape.circle,
             color: busy ? Colors.white38 : Colors.white,
           ),
-          child: busy
-              ? const Padding(padding: EdgeInsets.all(18), child: CircularProgressIndicator(strokeWidth: 2))
-              : null,
         ),
       ),
     );
   }
 }
 
-/// 顶层函数：在后台 isolate 中解码相机 JPEG 为 RGBA。
-/// 必须是顶层/静态且只依赖参数（不捕获 State/Controller），
-/// 否则 isolate spawn 会报 "object is unsendable"。
-RgbaImage decodeCapture(Uint8List bytes) {
+/// 后台 isolate 的入口：接收 (SendPort, 原始 JPEG 字节)，在独立 isolate
+/// 中解码 + 边缘检测，把纯可发送结果通过 SendPort 回传。必须用顶层函数
+/// 且通过参数传数据，绝对不能捕获任何 State/Controller（否则报 unsendable）。
+void _processCaptureEntry(List<dynamic> args) {
+  final port = args[0] as SendPort;
+  final bytes = args[1] as Uint8List;
+  final result = processCapture(bytes);
+  port.send(result);
+}
+
+/// 在后台 isolate 中执行解码与边缘检测，主线程不阻塞（快门按下即可继续）。
+/// 返回纯可发送数据，由调用方重建对象。
+Future<Map<String, Object?>> processCaptureAsync(Uint8List bytes) async {
+  final receive = ReceivePort();
+  await Isolate.spawn(_processCaptureEntry, [receive.sendPort, bytes]);
+  final result = await receive.first;
+  receive.close();
+  return result as Map<String, Object?>;
+}
+
+/// 后台 isolate 的业务逻辑：解码相机 JPEG -> RGBA，跑边缘检测，并生成 640 缩略图
+/// 的 JPEG 字节。全部重活都在后台 isolate 完成，主线程只负责写文件。
+/// 只依赖参数（不捕获 State/Controller），结果只含可跨 isolate 发送的数据。
+Map<String, Object?> processCapture(Uint8List bytes) {
   final mat = cv.imdecode(bytes, cv.IMREAD_COLOR);
   if (mat.isEmpty) throw StateError('照片解码失败');
   final rgba = cv.cvtColor(mat, cv.COLOR_BGR2RGBA);
-  final result = RgbaImage(Uint8List.fromList(rgba.data), rgba.cols, rgba.rows);
+  final width = rgba.cols, height = rgba.rows;
+  final rgbaBytes = Uint8List.fromList(rgba.data);
   mat.dispose();
   rgba.dispose();
-  return result;
+  final image = RgbaImage(rgbaBytes, width, height);
+  final detection = DocumentEdgeDetector.detect(Uint8ListRgba(rgbaBytes, width, height));
+  // 缩略图也在此生成（opencv imencode + 降采样），避免回主线程再做阻塞工作
+  final thumbJpeg = encodeJpegBytes(thumbOf(image, 640));
+  return {
+    'rgba': rgbaBytes,
+    'width': width,
+    'height': height,
+    'thumb': thumbJpeg,
+    // 角点（归一化 0..1）扁平化为 [x0,y0,x1,y1,...]
+    'corners': [for (final p in detection.corners) ...[p.x, p.y]],
+    'confidence': detection.confidence,
+    'statusIndex': detection.status.index,
+    'processingMs': detection.processingMs,
+    'candidateCount': detection.candidateCount,
+    'reason': detection.reason,
+  };
 }
 
 /// 通用错误弹窗：不自动消失（模态对话框），提供一键复制完整报错到剪贴板。

@@ -49,3 +49,23 @@ RgbaImage decodeImageBytes(Uint8List bytes) {
     mat.dispose();
   }
 }
+
+/// Downscales an RGBA image so its longest side is at most [maxSide].
+/// Pure Dart (no native binding) so it is safe to call inside an isolate.
+RgbaImage thumbOf(RgbaImage src, int maxSide) {
+  final scale = maxSide / (src.width > src.height ? src.width : src.height);
+  if (scale >= 1) return src;
+  final w = (src.width * scale).round(), h = (src.height * scale).round();
+  final out = Uint8List(w * h * 4);
+  for (var y = 0; y < h; y++) {
+    final sy = (y / scale).round().clamp(0, src.height - 1);
+    for (var x = 0; x < w; x++) {
+      final sx = (x / scale).round().clamp(0, src.width - 1);
+      final so = (sy * src.width + sx) * 4;
+      final o = (y * w + x) * 4;
+      out[o] = src.bytes[so]; out[o + 1] = src.bytes[so + 1];
+      out[o + 2] = src.bytes[so + 2]; out[o + 3] = 255;
+    }
+  }
+  return RgbaImage(out, w, h);
+}
