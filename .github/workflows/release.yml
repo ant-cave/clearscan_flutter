@@ -70,7 +70,6 @@ jobs:
         run: |
           # flutter build apk 统一产出 app-release.apk（无论单/多架构）
           cp build/app/outputs/flutter-apk/app-release.apk "build/app/outputs/flutter-apk/${{ steps.cfg.outputs.artifact }}"
-          fi
 
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
