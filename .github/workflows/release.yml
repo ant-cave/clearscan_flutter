@@ -68,9 +68,11 @@ jobs:
 
       - name: 重命名产物
         run: |
-          if echo "${{ steps.cfg.outputs.target }}" | grep -q "android-arm64"; then
+          if [ "${{ steps.cfg.outputs.artifact }}" = "app-arm64-v8a-release.apk" ]; then
+            # alpha：单架构，flutter 直接产出 app-arm64-v8a-release.apk
             cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk "build/app/outputs/flutter-apk/${{ steps.cfg.outputs.artifact }}"
           else
+            # 正式版：多架构，产出 app-release.apk
             cp build/app/outputs/flutter-apk/app-release.apk "build/app/outputs/flutter-apk/${{ steps.cfg.outputs.artifact }}"
           fi
 
