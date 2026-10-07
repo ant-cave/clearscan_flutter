@@ -31,12 +31,18 @@ class CameraCaptureScreen extends StatefulWidget {
   final CaptureMode mode;
   final ValueChanged<CapturedPage> onCaptured;
   final VoidCallback onClose;
+  /// 模式页签切换回调：单张/多张在拍摄界面内随时切换
+  final ValueChanged<CaptureMode>? onModeChanged;
+  /// 相册导入入口回调（为空则不显示导入按钮）
+  final VoidCallback? onImportGallery;
 
   const CameraCaptureScreen({
     super.key,
     required this.mode,
     required this.onCaptured,
     required this.onClose,
+    this.onModeChanged,
+    this.onImportGallery,
   });
 
   @override
@@ -44,6 +50,9 @@ class CameraCaptureScreen extends StatefulWidget {
 }
 
 class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
+  // 相机界面的主题强调色（快门描边 / 选中页签），与参考 UI 的青绿色一致
+  static const Color _accent = Color(0xFF00C9A7);
+
   cam.CameraController? _controller;
   List<cam.CameraDescription> _cameras = const [];
   bool _initializing = true;
@@ -51,11 +60,13 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
   bool _torchOn = false;
   bool _flash = false; // 按下快门瞬间的白屏提示
   bool _taking = false; // 仅锁住 takePicture，不阻塞 UI
-  int _shots = 0; // 按下快门即 +1，给用户即时反馈
+  // 当前拍摄模式：初始值来自上层，之后由界面内页签切换
+  CaptureMode _mode = CaptureMode.multiple;
 
   @override
   void initState() {
     super.initState();
+    _mode = widget.mode;
     _initCamera();
   }
 
@@ -99,12 +110,9 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
     final controller = _controller;
     if (controller == null || _taking) return; // 仅锁 takePicture，不弹转圈
     _taking = true;
-    // 按下快门立刻给用户反馈：白屏闪一下 + 计数 +1，完全不等后台处理
+    // 按下快门立刻给用户反馈：白屏闪一下，完全不等后台处理
     if (mounted) {
-      setState(() {
-        _shots++;
-        _flash = true;
-      });
+      setState(() => _flash = true);
       Future.delayed(const Duration(milliseconds: 120), () {
         if (mounted) setState(() => _flash = false);
       });
@@ -212,17 +220,17 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
             child: cam.CameraPreview(controller),
           ),
         ),
-        // top bar
+        // top bar：左关闭、右闪光灯（对应参考 UI 的顶栏布局）
         SafeArea(
           child: Align(
             alignment: Alignment.topCenter,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white, size: 28),
+                    icon: const Icon(Icons.close, color: Colors.white, size: 30),
                     onPressed: widget.onClose,
                   ),
                   IconButton(
@@ -233,40 +241,80 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
                     ),
                     onPressed: _toggleTorch,
                   ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.black45,
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Text(
-                      widget.mode == CaptureMode.single ? 'Single' : '已拍 $_shots 张',
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  ),
-                  const SizedBox(width: 48),
                 ],
               ),
             ),
           ),
         ),
-        // bottom controls
+        // bottom controls：模式页签 + 快门 + 相册导入
         Align(
           alignment: Alignment.bottomCenter,
           child: SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.only(bottom: 28),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const SizedBox(width: 72),
-                  _ShutterButton(
-                    busy: _taking,
-                    onTap: _capture,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 模式页签：单张 / 多张，选中项文字高亮并带顶部短横线指示
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 24),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _ModeTab(
+                        label: '单张',
+                        selected: _mode == CaptureMode.single,
+                        accent: _accent,
+                        onTap: () => _switchMode(CaptureMode.single),
+                      ),
+                      const SizedBox(width: 36),
+                      _ModeTab(
+                        label: '多张',
+                        selected: _mode == CaptureMode.multiple,
+                        accent: _accent,
+                        onTap: () => _switchMode(CaptureMode.multiple),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 72),
-                ],
-              ),
+                ),
+                // 快门行：左相册导入、中快门
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 20),
+                  child: SizedBox(
+                    height: 84,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const SizedBox(width: 40),
+                        // 相册导入入口（上层未提供则占位保持快门居中）
+                        if (widget.onImportGallery != null)
+                          GestureDetector(
+                            onTap: widget.onImportGallery,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 16),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.photo_library, color: Colors.white, size: 30),
+                                  const SizedBox(height: 4),
+                                  Text('相册导入',
+                                      style: const TextStyle(color: Colors.white, fontSize: 11)),
+                                ],
+                              ),
+                            ),
+                          )
+                        else
+                          const SizedBox(width: 62),
+                        const SizedBox(width: 24),
+                        _ShutterButton(
+                          busy: _taking,
+                          accent: _accent,
+                          onTap: _capture,
+                        ),
+                        const SizedBox(width: 150),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -276,24 +324,78 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
       ],
     );
   }
+
+  /// 界面内切换单张/多张模式，并通知上层当前选择。
+  void _switchMode(CaptureMode mode) {
+    if (mode == _mode) return;
+    setState(() => _mode = mode);
+    widget.onModeChanged?.call(mode);
+  }
+}
+
+/// 相机底部模式页签：选中项青绿色高亮 + 顶部短横线指示条。
+class _ModeTab extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final Color accent;
+  final VoidCallback onTap;
+
+  const _ModeTab({
+    required this.label,
+    required this.selected,
+    required this.accent,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 顶部指示短横线：选中时显示
+          Container(
+            width: 28,
+            height: 3,
+            margin: const EdgeInsets.only(bottom: 6),
+            decoration: BoxDecoration(
+              color: selected ? accent : Colors.transparent,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          Text(
+            label,
+            style: TextStyle(
+              color: selected ? accent : Colors.white,
+              fontSize: 16,
+              fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _ShutterButton extends StatelessWidget {
   final bool busy;
+  final Color accent;
   final VoidCallback onTap;
 
-  const _ShutterButton({required this.busy, required this.onTap});
+  const _ShutterButton({required this.busy, required this.accent, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: busy ? null : onTap,
       child: Container(
-        width: 72,
-        height: 72,
+        width: 84,
+        height: 84,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          border: Border.all(color: Colors.white, width: 4),
+          border: Border.all(color: accent, width: 5),
         ),
         padding: const EdgeInsets.all(6),
         child: Container(

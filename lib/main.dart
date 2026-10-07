@@ -543,6 +543,8 @@ class _CaptureFlowScreenState extends State<CaptureFlowScreen> {
   final List<DraftPage> _drafts = [];
   String? _message;
   String _selectedFilter = 'None';
+  // 当前拍摄模式：初始来自上层，之后随相机界面内页签切换
+  late CaptureMode _mode = widget.mode;
 
   Future<void> _onCaptured(CapturedPage page) async {
     final idBase = _drafts.isEmpty ? await DocumentStore.nextPageId() : (_drafts.last.id + 1);
@@ -568,12 +570,52 @@ class _CaptureFlowScreenState extends State<CaptureFlowScreen> {
       _drafts.add(draft);
       _message = '已拍摄 ${_drafts.length} 页';
     });
-    if (widget.mode == CaptureMode.single && mounted) {
+    if (_mode == CaptureMode.single && mounted) {
       // single mode: 打开裁剪页；裁剪页关闭后 CaptureFlow 整体出栈回主界面
       _openCrop(_drafts.length - 1);
     } else if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(_message!),
+        duration: const Duration(seconds: 1),
+      ));
+    }
+  }
+
+  /// 相机界面内切换单张/多张模式。
+  void _onModeChanged(CaptureMode mode) => setState(() => _mode = mode);
+
+  /// 相机界面的相册导入入口：选图后并入当前草稿队列。
+  Future<void> _importFromGalleryInCamera() async {
+    final picker = ImagePicker();
+    final picked = await picker.pickMultiImage(limit: 10);
+    if (picked.isEmpty || !mounted) return;
+    final root = await DocumentStore.documentsRoot();
+    final sessionDir = Directory('${root.path}/draft-import-${DateTime.now().millisecondsSinceEpoch}');
+    await sessionDir.create(recursive: true);
+    for (final xfile in picked) {
+      final bytes = await xfile.readAsBytes();
+      final img = decodeImageBytes(bytes);
+      final detection = DocumentEdgeDetector.detect(Uint8ListRgba(img.bytes, img.width, img.height));
+      final corners = (detection.status == DocumentDetectionStatus.detected && detection.corners.length == 4)
+          ? detection.corners
+          : defaultCropPoints(img.width, img.height);
+      final id = _drafts.isEmpty ? await DocumentStore.nextPageId() : _drafts.last.id + 1;
+      final thumbFile = File('${sessionDir.path}/$id-thumb.jpg');
+      await thumbFile.writeAsBytes(encodeJpegBytes(thumbOf(img, 640)));
+      if (!mounted) return;
+      setState(() {
+        _drafts.add(DraftPage(
+          id: id,
+          original: img,
+          thumbPath: thumbFile.path,
+          cropPoints: corners.map((p) => '${p.x},${p.y}').join(';'),
+          confidence: detection.corners.length == 4 ? detection.confidence : 0,
+        ));
+      });
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('已导入 ${picked.length} 张，共 ${_drafts.length} 页'),
         duration: const Duration(seconds: 1),
       ));
     }
@@ -601,9 +643,11 @@ class _CaptureFlowScreenState extends State<CaptureFlowScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: CameraCaptureScreen(
-        mode: widget.mode,
+        mode: _mode,
         onCaptured: _onCaptured,
         onClose: () => Navigator.of(context).pop(),
+        onModeChanged: _onModeChanged,
+        onImportGallery: _importFromGalleryInCamera,
       ),
       bottomNavigationBar: _drafts.isEmpty
           ? null
