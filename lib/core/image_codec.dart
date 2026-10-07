@@ -38,6 +38,10 @@ Uint8List encodePngBytes(RgbaImage img) {
 /// Decodes image bytes (JPEG/PNG) into an RGBA image.
 RgbaImage decodeImageBytes(Uint8List bytes) {
   final mat = cv.imdecode(bytes, cv.IMREAD_COLOR);
+  if (mat.isEmpty) {
+    mat.dispose();
+    throw StateError('图片解码失败');
+  }
   try {
     final rgba = cv.cvtColor(mat, cv.COLOR_BGR2RGBA);
     try {

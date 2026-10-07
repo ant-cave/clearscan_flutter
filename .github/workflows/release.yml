@@ -47,6 +47,11 @@ jobs:
       - name: 静态分析
         run: flutter analyze lib
 
+      # 计算提交短 hash（7 位），用于追加到版本名，便于溯源现场构建。
+      - name: 计算提交短 hash
+        id: rev
+        run: echo "hash=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
       # 判断是否 alpha：tag 中含 "alpha" 则只编译 armv8，否则编译完整 APK
       - name: 设置编译参数
         id: cfg
@@ -64,7 +69,8 @@ jobs:
           fi
 
       - name: 编译 APK
-        run: flutter build apk --target-platform ${{ steps.cfg.outputs.target }} --release
+        # build-name 追加提交短 hash（形如 1.0.0-alpha.1-abc1234），便于溯源现场构建。
+        run: flutter build apk --target-platform ${{ steps.cfg.outputs.target }} --release --build-name "${GITHUB_REF_NAME#v}-${{ steps.rev.outputs.hash }}"
 
       - name: 重命名产物
         run: |

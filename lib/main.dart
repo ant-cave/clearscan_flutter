@@ -336,7 +336,6 @@ class CaptureFlowScreen extends StatefulWidget {
 
 class _CaptureFlowScreenState extends State<CaptureFlowScreen> {
   final List<DraftPage> _drafts = [];
-  final bool _processing = false;
   String? _message;
   String _selectedFilter = 'None';
 
@@ -428,7 +427,7 @@ class _CaptureFlowScreenState extends State<CaptureFlowScreen> {
                     ),
                     const SizedBox(width: 12),
                     FilledButton.icon(
-                      onPressed: _processing ? null : () => _openCrop(0),
+                      onPressed: () => _openCrop(0),
                       icon: const Icon(Icons.crop),
                       label: Text('裁剪 (${_drafts.length})'),
                     ),

@@ -1,5 +1,5 @@
 name: clearscan_flutter
-description: "A new Flutter project."
+description: "ClearScan - 基于 Flutter 的文档扫描应用，支持边缘检测、透视校正、多滤镜与 PDF 导出。"
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
