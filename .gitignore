@@ -47,3 +47,6 @@ app.*.map.json
 
 # Android gradle build output
 android/build/
+
+# 本地密钥，切勿提交
+.env
