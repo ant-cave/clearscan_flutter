@@ -44,6 +44,19 @@ jobs:
       - name: 获取依赖
         run: flutter pub get
 
+      # 校验 tag 版本号与 pubspec.yaml 一致（忽略 +build 号），不一致直接失败，
+      # 防止 tag 与实际版本漂移。
+      - name: 校验版本号
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PUBSPEC_VERSION=$(grep '^version:' pubspec.yaml | sed 's/version:[[:space:]]*//' | cut -d'+' -f1)
+          echo "tag 版本: $TAG"
+          echo "pubspec 版本: $PUBSPEC_VERSION"
+          if [ "$TAG" != "$PUBSPEC_VERSION" ]; then
+            echo "::error::tag 版本 ($TAG) 与 pubspec.yaml 版本 ($PUBSPEC_VERSION) 不一致，请先更新 pubspec.yaml 的 version 字段"
+            exit 1
+          fi
+
       - name: 静态分析
         run: flutter analyze lib
 
