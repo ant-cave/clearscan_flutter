@@ -74,7 +74,10 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   List<DocumentMeta> _docs = [];
   bool _loading = true;
-  CaptureMode _mode = CaptureMode.multiple;
+  // 搜索关键词（按标题过滤现有文档）
+  String _query = '';
+  // 底部导航页签：0=首页 1=文档
+  int _tab = 0;
 
   @override
   void initState() {
@@ -91,11 +94,11 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
-  Future<void> _startCapture() async {
+  Future<void> _startCapture(CaptureMode mode) async {
     final saved = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
-        builder: (_) => CaptureFlowScreen(mode: _mode),
+        builder: (_) => CaptureFlowScreen(mode: mode),
       ),
     );
     if (saved == true) _refresh();
@@ -110,74 +113,349 @@ class _HomeScreenState extends State<HomeScreen> {
     final saved = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
-        builder: (_) => GalleryImportScreen(xFiles: picked, mode: _mode),
+        builder: (_) => GalleryImportScreen(xFiles: picked, mode: CaptureMode.multiple),
       ),
     );
     if (saved == true) _refresh();
   }
 
+  /// 按标题过滤文档（大小写不敏感）。
+  List<DocumentMeta> get _filtered {
+    final q = _query.trim().toLowerCase();
+    if (q.isEmpty) return _docs;
+    return _docs.where((d) => d.title.toLowerCase().contains(q)).toList();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('ClearScan'),
-        actions: [
-          SegmentedButton<CaptureMode>(
-            segments: const [
-              ButtonSegment(value: CaptureMode.single, label: Text('单张'), icon: Icon(Icons.crop_free)),
-              ButtonSegment(value: CaptureMode.multiple, label: Text('多张'), icon: Icon(Icons.photo_library)),
-            ],
-            selected: {_mode},
-            onSelectionChanged: (s) => setState(() => _mode = s.first),
-          ),
-          const SizedBox(width: 8),
-        ],
-      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _docs.isEmpty
+          : SafeArea(
+              child: _tab == 0 ? _buildHome(context) : _buildFiles(context),
+            ),
+      floatingActionButton: _loading
+          ? null
+          : FloatingActionButton.large(
+              heroTag: 'capture',
+              onPressed: () => _startCapture(CaptureMode.multiple),
+              child: const Icon(Icons.camera_alt, size: 32),
+            ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _tab,
+        onDestinationSelected: (i) => setState(() => _tab = i),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: '首页'),
+          NavigationDestination(icon: Icon(Icons.folder_outlined), selectedIcon: Icon(Icons.folder), label: '文档'),
+        ],
+      ),
+    );
+  }
+
+  // 首页：搜索栏 + 圆形快捷入口 + 最近文档面板
+  Widget _buildHome(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final recents = _filtered.take(5).toList();
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+          child: TextField(
+            onChanged: (v) => setState(() => _query = v),
+            decoration: InputDecoration(
+              hintText: '搜索文档',
+              prefixIcon: const Icon(Icons.search),
+              filled: true,
+              fillColor: scheme.surfaceContainerHigh,
+              isDense: true,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 20),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _QuickAction(
+                icon: Icons.crop_free,
+                color: scheme.primary,
+                label: '单张扫描',
+                onTap: () => _startCapture(CaptureMode.single),
+              ),
+              _QuickAction(
+                icon: Icons.photo_camera,
+                color: scheme.secondary,
+                label: '多张扫描',
+                onTap: () => _startCapture(CaptureMode.multiple),
+              ),
+              _QuickAction(
+                icon: Icons.photo_library,
+                color: scheme.tertiary,
+                label: '相册导入',
+                onTap: _importFromGallery,
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: Container(
+            width: double.infinity,
+            decoration: BoxDecoration(
+              color: scheme.surfaceContainerHighest,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+            ),
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 14, 8, 0),
+                  child: Row(
+                    children: [
+                      Text('最近文档',
+                          style: Theme.of(context)
+                              .textTheme
+                              .titleLarge
+                              ?.copyWith(fontWeight: FontWeight.bold)),
+                      const Spacer(),
+                      TextButton(
+                        onPressed: _docs.isEmpty ? null : () => setState(() => _tab = 1),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [Text('查看全部'), Icon(Icons.chevron_right, size: 20)],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(child: _buildRecentList(context, recents)),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // 最近文档列表：缩略图 + 标题 + 日期/页数
+  Widget _buildRecentList(BuildContext context, List<DocumentMeta> recents) {
+    if (_docs.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.document_scanner,
+                size: 56, color: Theme.of(context).colorScheme.primary.withValues(alpha: .4)),
+            const SizedBox(height: 12),
+            Text('还没有文档', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text('点击下方相机或快捷入口开始扫描', style: Theme.of(context).textTheme.bodySmall),
+          ],
+        ),
+      );
+    }
+    if (recents.isEmpty) {
+      return const Center(child: Text('无匹配文档'));
+    }
+    return ListView.separated(
+      padding: const EdgeInsets.fromLTRB(8, 4, 8, 96),
+      itemCount: recents.length,
+      separatorBuilder: (_, __) => const Divider(height: 1, indent: 76),
+      itemBuilder: (context, i) {
+        final doc = recents[i];
+        final thumb = doc.firstThumbPath;
+        return ListTile(
+          onTap: () async {
+            await Navigator.push(
+                context, MaterialPageRoute(builder: (_) => EditorScreen(docId: doc.id)));
+            _refresh();
+          },
+          onLongPress: () => _showDocMenu(context, doc, _refresh),
+          leading: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: SizedBox(
+              width: 52,
+              height: 64,
+              child: thumb != null
+                  ? Image.file(File(thumb),
+                      fit: BoxFit.cover, errorBuilder: (_, __, ___) => _thumbPlaceholder())
+                  : _thumbPlaceholder(),
+            ),
+          ),
+          title: Text(doc.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+          subtitle: Text('${doc.pages.length} 页 · ${_formatDateTime(doc.createdAt)}'),
+        );
+      },
+    );
+  }
+
+  static Widget _thumbPlaceholder() =>
+      const ColoredBox(color: Colors.black12, child: Icon(Icons.image));
+
+  // 文档页：全部文档网格（与首页列表共用长按菜单）
+  Widget _buildFiles(BuildContext context) {
+    final docs = _filtered;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
+          child: Text('全部文档',
+              style:
+                  Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
+        ),
+        Expanded(
+          child: docs.isEmpty
               ? Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(Icons.document_scanner, size: 72, color: Theme.of(context).colorScheme.primary.withValues(alpha: .4)),
+                      Icon(Icons.folder_open,
+                          size: 64, color: Theme.of(context).colorScheme.primary.withValues(alpha: .4)),
                       const SizedBox(height: 12),
-                      Text('还没有文档', style: Theme.of(context).textTheme.titleMedium),
-                      const SizedBox(height: 4),
-                      Text('点击右下角相机开始扫描', style: Theme.of(context).textTheme.bodySmall),
+                      Text(_docs.isEmpty ? '还没有文档' : '无匹配文档',
+                          style: Theme.of(context).textTheme.titleMedium),
                     ],
                   ),
                 )
               : GridView.builder(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
                   gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 2, mainAxisSpacing: 12, crossAxisSpacing: 12, childAspectRatio: .78),
-                  itemCount: _docs.length,
+                      crossAxisCount: 2,
+                      mainAxisSpacing: 12,
+                      crossAxisSpacing: 12,
+                      childAspectRatio: .78),
+                  itemCount: docs.length,
                   itemBuilder: (context, index) {
-                    final doc = _docs[index];
-                    return _DocumentCard(
-                      doc: doc,
-                      onChanged: _refresh,
-                    );
+                    final doc = docs[index];
+                    return _DocumentCard(doc: doc, onChanged: _refresh);
                   },
                 ),
-      floatingActionButton: Column(
+        ),
+      ],
+    );
+  }
+
+  static String _formatDateTime(int ms) {
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${d.year}-${two(d.month)}-${two(d.day)} ${two(d.hour)}:${two(d.minute)}';
+  }
+}
+
+/// 首页圆形快捷入口（图标圆底 + 文字标签）。
+class _QuickAction extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String label;
+  final VoidCallback onTap;
+
+  const _QuickAction({
+    required this.icon,
+    required this.color,
+    required this.label,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(16),
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 56,
+              height: 56,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: color.withValues(alpha: .15)),
+              child: Icon(icon, color: color, size: 26),
+            ),
+            const SizedBox(height: 8),
+            Text(label, style: Theme.of(context).textTheme.labelMedium),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 长按文档弹出管理菜单：重命名 / 删除（列表与网格共用）。
+Future<void> _showDocMenu(BuildContext context, DocumentMeta doc, VoidCallback onChanged) async {
+  final action = await showModalBottomSheet<String>(
+    context: context,
+    builder: (ctx) => SafeArea(
+      child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          FloatingActionButton.small(
-            heroTag: 'gallery',
-            onPressed: _importFromGallery,
-            child: const Icon(Icons.photo_library),
+          ListTile(
+            leading: const Icon(Icons.drive_file_rename_outline),
+            title: const Text('重命名'),
+            onTap: () => Navigator.pop(ctx, 'rename'),
           ),
-          const SizedBox(height: 12),
-          FloatingActionButton.large(
-            heroTag: 'capture',
-            onPressed: _startCapture,
-            child: const Icon(Icons.camera_alt, size: 32),
+          ListTile(
+            leading: Icon(Icons.delete_outline, color: Theme.of(ctx).colorScheme.error),
+            title: Text('删除文档', style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
+            onTap: () => Navigator.pop(ctx, 'delete'),
           ),
         ],
       ),
-    );
+    ),
+  );
+  if (!context.mounted) return;
+  if (action == 'delete') {
+    await _confirmDeleteDoc(context, doc, onChanged);
+  } else if (action == 'rename' && context.mounted) {
+    await _renameDoc(context, doc, onChanged);
+  }
+}
+
+Future<void> _confirmDeleteDoc(BuildContext context, DocumentMeta doc, VoidCallback onChanged) async {
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('删除文档'),
+      content: Text('确定删除「${doc.title}」？此操作不可恢复。'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('删除'),
+        ),
+      ],
+    ),
+  );
+  if (ok == true) {
+    await DocumentStore.deleteDocument(doc.id);
+    onChanged();
+  }
+}
+
+Future<void> _renameDoc(BuildContext context, DocumentMeta doc, VoidCallback onChanged) async {
+  final controller = TextEditingController(text: doc.title);
+  final newTitle = await showDialog<String>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('重命名'),
+      content: TextField(
+        controller: controller,
+        autofocus: true,
+        decoration: const InputDecoration(labelText: '文档标题', border: OutlineInputBorder()),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, controller.text.trim()), child: const Text('确定')),
+      ],
+    ),
+  );
+  if (newTitle != null && newTitle.isNotEmpty && newTitle != doc.title) {
+    await DocumentStore.renameDocument(doc.id, newTitle);
+    onChanged();
   }
 }
 
@@ -186,51 +464,6 @@ class _DocumentCard extends StatelessWidget {
   final VoidCallback onChanged;
 
   const _DocumentCard({required this.doc, required this.onChanged});
-
-  Future<void> _confirmDelete(BuildContext context) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('删除文档'),
-        content: Text('确定删除「${doc.title}」？此操作不可恢复。'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
-    if (ok == true) {
-      await DocumentStore.deleteDocument(doc.id);
-      onChanged();
-    }
-  }
-
-  Future<void> _rename(BuildContext context) async {
-    final controller = TextEditingController(text: doc.title);
-    final newTitle = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('重命名'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: '文档标题', border: OutlineInputBorder()),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, controller.text.trim()), child: const Text('确定')),
-        ],
-      ),
-    );
-    if (newTitle != null && newTitle.isNotEmpty && newTitle != doc.title) {
-      await DocumentStore.renameDocument(doc.id, newTitle);
-      onChanged();
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -242,35 +475,7 @@ class _DocumentCard extends StatelessWidget {
           await Navigator.push(context, MaterialPageRoute(builder: (_) => EditorScreen(docId: doc.id)));
           onChanged();
         },
-        onLongPress: () async {
-          // 长按弹出管理菜单：重命名 / 删除
-          final action = await showModalBottomSheet<String>(
-            context: context,
-            builder: (ctx) => SafeArea(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ListTile(
-                    leading: const Icon(Icons.drive_file_rename_outline),
-                    title: const Text('重命名'),
-                    onTap: () => Navigator.pop(ctx, 'rename'),
-                  ),
-                  ListTile(
-                    leading: Icon(Icons.delete_outline, color: Theme.of(ctx).colorScheme.error),
-                    title: Text('删除文档', style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
-                    onTap: () => Navigator.pop(ctx, 'delete'),
-                  ),
-                ],
-              ),
-            ),
-          );
-          if (!context.mounted) return;
-          if (action == 'delete') {
-            await _confirmDelete(context);
-          } else if (action == 'rename' && context.mounted) {
-            await _rename(context);
-          }
-        },
+        onLongPress: () => _showDocMenu(context, doc, onChanged),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
